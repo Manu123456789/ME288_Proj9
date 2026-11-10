@@ -1,0 +1,56 @@
+%% CONFIGURATION
+t0 = 0;
+tf = -20;      % Backward 20 seconds
+dt = 0.01;
+
+truth = load('truth_data.mat');
+truth = truth.truth;  % Replace with actual struct name
+
+%% EXTRACT INITIAL CONDITIONS
+% Assumes truth time is ordered
+tTruth = truth.time(:);
+RTruth = truth.R;
+VTruth = truth.V;
+
+% State at requested initial time
+R0 = interp1(tTruth, RTruth, t0);
+V0 = interp1(tTruth, VTruth, t0);
+
+%% RUN EXISTING PROPAGATOR
+[R, V, time, acc_grav, acc_drag] = ...
+    propagate_traj(R0, V0, t0, tf, dt);
+
+%% ALIGN TRUTH WITH PROPAGATED TIMES
+% interp1 requires monotonically increasing sample times
+[tSorted, idx] = sort(tTruth);
+RTruthAligned = interp1(tSorted, RTruth(idx,:), time);
+VTruthAligned = interp1(tSorted, VTruth(idx,:), time);
+
+%% COMPUTE ERRORS
+dR = R - RTruthAligned;
+dV = V - VTruthAligned;
+
+posError = vecnorm(dR, 2, 2);
+velError = vecnorm(dV, 2, 2);
+
+% Endpoint errors (at tf)
+finalPosError = posError(end);
+finalVelError = velError(end);
+
+%% PLOT
+figure;
+
+subplot(2,1,1)
+plot(time, posError)
+ylabel('Position Error [m]')
+grid on
+
+subplot(2,1,2)
+plot(time, velError)
+ylabel('Velocity Error [m/s]')
+xlabel('Time [s]')
+grid on
+
+%% REPORT
+fprintf('Final Position Error: %.4f m\n', finalPosError);
+fprintf('Final Velocity Error: %.4f m/s\n', finalVelError);

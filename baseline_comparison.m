@@ -1,90 +1,268 @@
-%% BASELINE COMPARISON: existing propagator vs. truth trajectory
-% No beta-model changes. Requires propagate_traj.m on the MATLAB path.
 
-%% INPUTS (edit only this section)
-truthFile = 'truth_data.mat';  % MAT file containing the truth struct
-truthName = 'truth';           % Name of the struct stored in that file
+%% BASELINE COMPARISON: Existing Propagator vs. Truth Trajectory
+% Requires your existing propagate_traj.m on the MATLAB path.
 
-fieldTime = 'time';            % Truth time field: N x 1
-fieldR    = 'R';               % Truth position field: N x 3
-fieldV    = 'V';               % Truth velocity field: N x 3
+%% =========================================================
+%  INPUTS (EDIT THIS SECTION)
+% ==========================================================
 
-t1 = 0;                       % Initial time [s]
-t2 = -20;                     % Final time [s]; may be before t1
-dt = 0.01;                    % Propagator step magnitude [s]
+truthFile = 'truth_data.mat';   % MAT file containing truth trajectory struct
+truthName = 'truth';            % Struct variable name in MAT file
 
-%% LOAD AND CHECK TRUTH
+fieldTime = 'time';             % Truth time field (N x 1)
+fieldR    = 'R';                % Truth position field (N x 3)
+fieldV    = 'V';                % Truth velocity field (N x 3)
+
+t1 = 0;                        % Initial time [s]
+t2 = -20;                      % Final time [s] (forward or backward)
+dt = 0.01;                     % Propagator time step [s]
+
+
+%% =========================================================
+%  LOAD TRUTH AND EXTRACT INITIAL STATE
+% ==========================================================
+
 S = load(truthFile);
 truth = S.(truthName);
-tTruth = truth.(fieldTime); tTruth = tTruth(:);
+
+tTruth = truth.(fieldTime);
+tTruth = tTruth(:);
+
 RTruth = truth.(fieldR);
 VTruth = truth.(fieldV);
 
-assert(size(RTruth,1)==numel(tTruth) && size(RTruth,2)==3, ...
-    'Truth position must be N-by-3, with N truth timestamps.');
-assert(size(VTruth,1)==numel(tTruth) && size(VTruth,2)==3, ...
-    'Truth velocity must be N-by-3, with N truth timestamps.');
-assert(all(isfinite(tTruth)) && all(isfinite(RTruth(:))) && ...
-    all(isfinite(VTruth(:))), 'Truth contains NaN or Inf.');
-assert(isscalar(dt) && isfinite(dt) && dt>0 && t1~=t2, ...
-    'Use dt > 0 and different finite start/end times.');
+% Reverse a descending truth history for interpolation
+if tTruth(1) > tTruth(end)
+    tTruth = flipud(tTruth);
+    RTruth = flipud(RTruth);
+    VTruth = flipud(VTruth);
+end
 
-% Sort truth once, so interpolation works even if the file is reversed.
-[tTruth, order] = sort(tTruth);
-RTruth = RTruth(order,:);
-VTruth = VTruth(order,:);
-assert(all(diff(tTruth)>0), 'Truth timestamps must be unique.');
-assert(min(t1,t2)>=tTruth(1) && max(t1,t2)<=tTruth(end), ...
-    'Requested interval lies outside the truth history.');
+% Essential checks
+assert(all(diff(tTruth) > 0), ...
+    'Truth timestamps must be ordered and unique.');
 
-%% SEED AND RUN EXISTING PROPAGATOR
+assert(min(t1,t2) >= tTruth(1) && max(t1,t2) <= tTruth(end), ...
+    'Requested time interval must be within the truth history.');
+
+% Extract initial position and velocity at t1
 R0 = interp1(tTruth, RTruth, t1, 'linear');
 V0 = interp1(tTruth, VTruth, t1, 'linear');
-[R, V, tModel, ~, ~] = propagate_traj(R0, V0, t1, t2, dt);
+
+
+%% =========================================================
+%  RUN EXISTING PROPAGATOR
+% ==========================================================
+
+[R, V, tModel, ~, ~] = ...
+    propagate_traj(R0, V0, t1, t2, dt);
+
 tModel = tModel(:);
 
-assert(size(R,1)==numel(tModel) && size(R,2)==3 && ...
-       size(V,1)==numel(tModel) && size(V,2)==3, ...
-       'Propagator outputs R and V must be N-by-3.');
-tol = 1e-8 * max([1,abs(t1),abs(t2)]);
-assert(abs(tModel(1)-t1)<tol && abs(tModel(end)-t2)<tol, ...
-    'Propagator did not cover the requested interval exactly.');
+tol = 1e-8 * max([1, abs(t1), abs(t2)]);
 
-%% COMPUTE ERRORS AT THE PROPAGATOR TIME STAMPS
-RRef = interp1(tTruth, RTruth, tModel, 'linear');
-VRef = interp1(tTruth, VTruth, tModel, 'linear');
-errors = {R-RRef, V-VRef};  % Signed component errors, model minus truth
-names  = {'Position', 'Velocity'};
-units  = {'m', 'm/s'};
-axes3  = {'X','Y','Z'};
+assert(abs(tModel(1)-t1) < tol && abs(tModel(end)-t2) < tol, ...
+    'Propagator did not reach the requested start and end times.');
 
-%% TWO FIGURES: 3 COMPONENT PLOTS LEFT, TOTAL MAGNITUDE RIGHT
-for k = 1:2
-    E = errors{k};
-    totalError = sqrt(sum(E.^2,2));  % 3D Euclidean norm per time sample
+% Convert model history to increasing time for interpolation
+if tModel(1) > tModel(end)
+    tModelUp = flipud(tModel);
+    RUp = flipud(R);
+    VUp = flipud(V);
+else
+    tModelUp = tModel;
+    RUp = R;
+    VUp = V;
+end
 
-    figure('Name',[names{k} ' baseline error'],'Color','w');
-    tiledlayout(3,2,'TileSpacing','compact','Padding','compact');
-    for j = 1:3
-        nexttile(2*j-1);  % Left column: tiles 1, 3, 5
-        plot(tModel,E(:,j),'LineWidth',1.2);
-        ylabel(sprintf('%s error [%s]',axes3{j},units{k}));
-        grid on;
-        if j==3, xlabel('Time [s]'); end
+% Remove endpoint roundoff
+tModelUp([1 end]) = [min(t1,t2), max(t1,t2)];
+
+
+%% =========================================================
+%  ALIGN TRUTH AND MODEL TIME HISTORIES
+% ==========================================================
+
+% Use the coarser time grid for comparison.
+% Interpolate the other history to the comparison times.
+
+if median(diff(tTruth)) >= median(diff(tModelUp))
+
+    % Truth has coarser sampling
+    tCompare = tTruth(tTruth >= min(t1,t2) & ...
+                      tTruth <= max(t1,t2));
+
+else
+
+    % Propagator has coarser sampling
+    tCompare = tModelUp;
+
+end
+
+% Include exact initial and final times
+tCompare = unique([tCompare; t1; t2]);
+
+% Preserve propagation direction
+if t2 < t1
+    tCompare = flipud(tCompare);
+end
+
+% Interpolate truth onto comparison times
+RRef = interp1(tTruth, RTruth, tCompare, 'linear');
+VRef = interp1(tTruth, VTruth, tCompare, 'linear');
+
+% Interpolate propagator onto comparison times
+RSim = interp1(tModelUp, RUp, tCompare, 'linear');
+VSim = interp1(tModelUp, VUp, tCompare, 'linear');
+
+
+%% =========================================================
+%  COMPUTE ERRORS
+% ==========================================================
+
+% Signed component errors: propagated - truth
+dR = RSim - RRef;
+dV = VSim - VRef;
+
+% Total 3D error magnitudes
+posError = vecnorm(dR, 2, 2);
+velError = vecnorm(dV, 2, 2);
+
+% Final errors
+finalPosError = posError(end);
+finalVelError = velError(end);
+
+
+%% =========================================================
+%  FIGURE 1: POSITION ERRORS
+% ==========================================================
+
+figure('Name','Position Baseline Error','Color','w');
+
+tiledlayout(3,2, ...
+    'TileSpacing','compact', ...
+    'Padding','compact');
+
+xyz = {'X','Y','Z'};
+
+% Left column: X, Y, Z component errors
+for j = 1:3
+
+    nexttile(2*j-1);
+
+    plot(tCompare, dR(:,j), 'LineWidth',1.2);
+
+    ylabel(sprintf('%s Error [m]',xyz{j}));
+    grid on;
+
+    if j == 3
+        xlabel('Time [s]');
     end
 
-    nexttile(2,[3 1]);  % Right column: one plot spanning all three rows
-    plot(tModel,totalError,'LineWidth',1.5); hold on;
-    plot(tModel(end),totalError(end),'o','MarkerSize',7,'LineWidth',1.5);
-    grid on;
-    xlabel('Time [s]');
-    ylabel(sprintf('3D error magnitude [%s]',units{k}));
-    title('Total error (endpoint marked)');
-    sgtitle([names{k} ' error: propagator minus truth']);
-
-    fprintf('\n%s error [%s]\n',names{k},units{k});
-    fprintf('  Final XYZ:   [% .6g, % .6g, % .6g]\n',E(end,:));
-    fprintf('  Final total: %.6g\n',totalError(end));
-    fprintf('  RMS total:   %.6g\n',sqrt(mean(totalError.^2)));
-    fprintf('  Peak total:  %.6g\n',max(totalError));
 end
+
+% Right column: total position error magnitude
+nexttile(2,[3 1]);
+
+plot(tCompare, posError, 'LineWidth',1.5);
+hold on;
+
+plot(tCompare(end), finalPosError, 'o', ...
+    'MarkerSize',7, 'LineWidth',1.5);
+
+xlabel('Time [s]');
+ylabel('3D Position Error [m]');
+
+title(sprintf('Final Position Error: %.6g m',finalPosError));
+
+grid on;
+
+sgtitle('Position Error: Propagator - Truth');
+
+
+%% =========================================================
+%  FIGURE 2: VELOCITY ERRORS
+% ==========================================================
+
+figure('Name','Velocity Baseline Error','Color','w');
+
+tiledlayout(3,2, ...
+    'TileSpacing','compact', ...
+    'Padding','compact');
+
+% Left column: X, Y, Z component errors
+for j = 1:3
+
+    nexttile(2*j-1);
+
+    plot(tCompare, dV(:,j), 'LineWidth',1.2);
+
+    ylabel(sprintf('%s Error [m/s]',xyz{j}));
+    grid on;
+
+    if j == 3
+        xlabel('Time [s]');
+    end
+
+end
+
+% Right column: total velocity error magnitude
+nexttile(2,[3 1]);
+
+plot(tCompare, velError, 'LineWidth',1.5);
+hold on;
+
+plot(tCompare(end), finalVelError, 'o', ...
+    'MarkerSize',7, 'LineWidth',1.5);
+
+xlabel('Time [s]');
+ylabel('3D Velocity Error [m/s]');
+
+title(sprintf('Final Velocity Error: %.6g m/s',finalVelError));
+
+grid on;
+
+sgtitle('Velocity Error: Propagator - Truth');
+
+
+%% =========================================================
+%  PRINT ERROR STATISTICS
+% ==========================================================
+
+fprintf('\n========================================\n');
+fprintf('       BASELINE PROPAGATION ERRORS\n');
+fprintf('========================================\n');
+
+fprintf('Initial Time: %.6f s\n', t1);
+fprintf('Final Time:   %.6f s\n', t2);
+fprintf('Time Step:    %.6f s\n', dt);
+
+% Position
+fprintf('\n--- POSITION ERRORS [m] ---\n');
+
+fprintf('Final X Error: % .6g\n', dR(end,1));
+fprintf('Final Y Error: % .6g\n', dR(end,2));
+fprintf('Final Z Error: % .6g\n', dR(end,3));
+
+fprintf('FINAL 3D POSITION ERROR: %.6g m\n', finalPosError);
+fprintf('RMS 3D Position Error:   %.6g m\n', sqrt(mean(posError.^2)));
+fprintf('Peak 3D Position Error:  %.6g m\n', max(posError));
+
+% Velocity
+fprintf('\n--- VELOCITY ERRORS [m/s] ---\n');
+
+fprintf('Final X Error: % .6g\n', dV(end,1));
+fprintf('Final Y Error: % .6g\n', dV(end,2));
+fprintf('Final Z Error: % .6g\n', dV(end,3));
+
+fprintf('FINAL 3D VELOCITY ERROR: %.6g m/s\n', finalVelError);
+fprintf('RMS 3D Velocity Error:   %.6g m/s\n', sqrt(mean(velError.^2)));
+fprintf('Peak 3D Velocity Error:  %.6g m/s\n', max(velError));
+
+% Endpoint comparison
+fprintf('\n--- FINAL POSITION COMPARISON [m] ---\n');
+
+fprintf('Truth:      [% .6g, % .6g, % .6g]\n', RRef(end,:));
+fprintf('Propagated: [% .6g, % .6g, % .6g]\n', RSim(end,:));
+
+fprintf('\n========================================\n');

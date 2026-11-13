@@ -1,0 +1,52 @@
+--- Drag.m
++++ Drag.m
+@@ -1,8 +1,9 @@
+-function [a_drag, aero] = Drag(R, V)
++function [a_drag, aero, cdMap] = Drag(R, V)
+ %DRAG Compute wind-axis drag acceleration for an ECI position and velocity.
+ %
+ %   a_drag = Drag(R, V)
+ %   [a_drag, aero] = Drag(R, V)
++%   [a_drag, aero, cdMap] = Drag(R, V) returns the map inputs.
+ %
+ % R and V are three-element ECI vectors in SI units. The first call reads
+ % the named base-workspace variables and prepares the fixed-angle lookup.
+@@ -50,6 +51,12 @@
+     model = cfg;
+ end
+ 
++if nargout > 2
++    cdMap.alphaDeg = model.alphaDeg;
++    cdMap.tables = {model.CA, model.CN, model.CY};
++    cdMap.evaluate = @(Mach, Re) dragWindCoefficients(model, Mach, Re);
++end
++
+ % Air-relative velocity in ECI.
+ V_atm = cross(model.omegaEarth, reshape(R, 1, 3));
+ V_rel = reshape(V, 1, 3) - V_atm;
+@@ -69,10 +76,7 @@
+ Re = model.reynoldsFcn(H, rho, U);
+ validateattributes(Re, {'numeric'}, {'scalar','real','finite','nonnegative'});
+ 
+-CA = dragCoefficientAt(model.CA, Mach, Re);
+-CN = dragCoefficientAt(model.CN, Mach, Re);
+-CY = dragCoefficientAt(model.CY, Mach, Re);
+-[CD, CL, CS] = model.bodyToWindFcn(CA, CN, CY, model.alphaDeg, 0);
++[CD, CL, CS, CA, CN, CY] = dragWindCoefficients(model, Mach, Re);
+ validateattributes(CD, {'numeric'}, {'scalar','real','finite','nonnegative'});
+ 
+ qbar = 0.5 * rho * U^2;
+@@ -182,6 +186,13 @@
+ end
+ end
+ 
++function [CD, CL, CS, CA, CN, CY] = dragWindCoefficients(model, Mach, Re)
++CA = dragCoefficientAt(model.CA, Mach, Re);
++CN = dragCoefficientAt(model.CN, Mach, Re);
++CY = dragCoefficientAt(model.CY, Mach, Re);
++[CD, CL, CS] = model.bodyToWindFcn(CA, CN, CY, model.alphaDeg, 0);
++end
++
+ function [CD, CL, CS] = bodyToWindZeroSlip(CA, CN, CY, alphaDeg, ~)
+ % Positive axial aft, normal up, side right. Called at zero sideslip.
+ CD = CA * cosd(alphaDeg) + CN * sind(alphaDeg);

@@ -6,10 +6,11 @@ function out = plot_drag_cd_map(time, R, V, dragFcn, reDivisor, markerStride)
 %
 % R and V are N-by-3 ECI histories. Pass rows in propagation order.
 % Use the Drag function with the optional third output described in README.
+% A drag function with three inputs receives each state's time.
 % reDivisor changes the display axis only. The default is 1 (table scale).
 % markerStride shows every Nth valid query as a red dot. The default is 1.
 % The line, arrows, and returned arrays use all saved states.
-% out.Mach, out.Re, and out.CD contain the evaluated values for each row.
+% out.Mach, out.Re, out.CD, and out.alphaDeg contain each evaluated query.
 % A state with zero relative airspeed has NaN entries and breaks the line.
 
 if nargin < 4 || isempty(dragFcn)
@@ -33,19 +34,30 @@ validateattributes(R, {'numeric'}, {'size',[n 3],'real','finite'});
 validateattributes(V, {'numeric'}, {'size',[n 3],'real','finite'});
 
 % Replay the saved states through the same Drag used by the propagator.
+passTime = nargin(dragFcn) == 3;
 mach = nan(n,1);
 reynolds = nan(n,1);
 cd = nan(n,1);
+alphaDeg = nan(n,1);
 for k = 1:n
+    args = {R(k,:), V(k,:)};
+    if passTime
+        args{3} = time(k);
+    end
     if k == 1
-        [~, aero, map] = dragFcn(R(k,:), V(k,:));
+        [~, aero, map] = dragFcn(args{:});
     else
-        [~, aero] = dragFcn(R(k,:), V(k,:));
+        [~, aero] = dragFcn(args{:});
     end
     if ~isempty(aero)
         mach(k) = aero.Mach;
         reynolds(k) = aero.Re;
         cd(k) = aero.CD;
+        if isfield(aero, 'alphaDeg')
+            alphaDeg(k) = aero.alphaDeg;
+        else
+            alphaDeg(k) = map.alphaDeg;
+        end
     end
 end
 
@@ -75,6 +87,7 @@ if any(valid)
         datatipTextRow('Time (s)', time(dotRows)), ...
         datatipTextRow('Mach', mach(dotRows)), ...
         datatipTextRow('Reynolds (table scale)', reynolds(dotRows)), ...
+        datatipTextRow('Angle of attack (deg)', alphaDeg(dotRows)), ...
         datatipTextRow('C_D', cd(dotRows))];
     first = dotRows(1);
     last = dotRows(end);
@@ -108,11 +121,11 @@ else
     ylabel(ax, sprintf('Table Reynolds number / %g', reDivisor));
 end
 zlabel(ax, 'C_D');
-title(ax, sprintf('Drag coefficient at %.3g deg angle of attack', map.alphaDeg));
+title(ax, sprintf('Trajectory drag queries | surface at %.3g deg AoA', map.alphaDeg));
 drawDirectionArrows(ax, mach, rePlot, cd, valid, red);
 
 out = struct('figure', fig, 'axes', ax, 'time', time, ...
-    'Mach', mach, 'Re', reynolds, 'CD', cd);
+    'Mach', mach, 'Re', reynolds, 'CD', cd, 'alphaDeg', alphaDeg);
 end
 
 function drawCoefficientSurface(ax, map, reDivisor)
@@ -130,7 +143,7 @@ edges = edges(edges >= first & edges <= last);
 
 for k = 1:numel(edges)-1
     range = edges(k:k+1);
-    mach = sharedMachBreakpoints(tables, range);
+    mach = sharedMachBreakpoints(tables, range, map.alphaDeg);
     if isempty(mach)
         continue
     end
@@ -151,7 +164,7 @@ end
 % Exact Reynolds breakpoints can cover Mach values beyond adjacent strips.
 for k = 1:numel(edges)
     re = edges(k);
-    mach = sharedMachBreakpoints(tables, re);
+    mach = sharedMachBreakpoints(tables, re, map.alphaDeg);
     if isempty(mach)
         continue
     end
@@ -164,8 +177,8 @@ for k = 1:numel(edges)
 end
 end
 
-function breakpoints = sharedMachBreakpoints(tables, reRange)
-% Find the Mach coverage shared by the slices used over this Re interval.
+function breakpoints = sharedMachBreakpoints(tables, reRange, alphaDeg)
+% Find the common Mach coverage for this Re interval and reference angle.
 lower = -Inf;
 upper = Inf;
 breakpoints = [];
@@ -175,6 +188,13 @@ for k = 1:numel(tables)
     last = find(table.Re >= reRange(end), 1, 'first');
     for j = first:last
         curve = table.curves{j};
+        if numel(curve.GridVectors) > 1
+            angles = curve.GridVectors{2};
+            if alphaDeg < angles(1) || alphaDeg > angles(end)
+                breakpoints = [];
+                return
+            end
+        end
         mach = curve.GridVectors{1}(:);
         lower = max(lower, mach(1));
         upper = min(upper, mach(end));

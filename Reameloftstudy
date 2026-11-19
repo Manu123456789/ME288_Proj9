@@ -1,0 +1,44 @@
+Fit one drag multiplier per launch loft and keep it constant throughout that run. Each truth case needs a label, launch loft, time vector, and N×3 ECI position and velocity histories. The first position and velocity initialize your propagator. The remaining samples tell the fitter how well it did. You don’t need an angle-of-attack history for this study.
+
+The two files are available individually for transcription, or together as a ZIP.
+
+fit_loft_drag.m⁠￼ · drag_study_scale.m⁠￼ · Loft_Drag_Study.zip⁠￼
+
+1. Change one line in Drag.m
+
+Replace inverseBeta = model.K_norm * CD; with:
+
+inverseBeta = drag_study_scale() * model.K_norm * CD;
+
+Put both downloaded functions alongside your propagator. drag_study_scale() defaults to 1. During a trial, the fitter sets it once, so the predictor and corrector both use the same multiplier. Your five-input call to propagate_traj works as before. The CD map still reports the aerodynamic table coefficient, and the multiplier acts on the resulting drag acceleration.
+
+2. Enter your cases and run the study
+
+makeRun = @(label,loft,t,R,V) struct('label',label,'loftDeg',loft, ...
+                                     'time',t(:),'R',R,'V',V);
+runs(1) = makeRun('Case A', 10, tA, RA, VA);
+runs(2) = makeRun('Case B', 15, tB, RB, VB);
+runs(3) = makeRun('Case C', 25, tC, RC, VC);
+% Add one line per additional trajectory.
+scaleGrid = 0.90:0.025:1.10;
+out = fit_loft_drag(runs, dt, scaleGrid, 100, 1, 15);
+out.fit
+out.globalScale
+out.cases
+
+Use your normal propagation step for dt. The example weights, 100 metres and 1 m/s, mean that a 100 m position error contributes as much to the score as a 1 m/s velocity error. The fitter interpolates the propagated states onto the truth timestamps and averages the squared errors over time. Runs at the same loft share a fitted multiplier.
+
+The final 15 holds out every 15° case. In this example, the study fits the 10° and 25° cases, linearly interpolates their multipliers to predict the 15° scale, then runs the 15° trajectory to score that prediction. For your low-loft question, hold out a low loft with a training loft on either side. Omit the last argument to fit all cases.
+
+3. Decide whether loft dependence helps
+
+Result	What it tells you
+out.fit	Best multiplier at each training loft. A value of 0.98 reduces drag acceleration by 2% at the same state.
+out.globalScale	Best single multiplier across all training runs, giving each run equal weight.
+out.cases	For each run, Jbase scores the original model, Jglobal scores the single multiplier, and Jloft scores the loft-dependent multiplier. Lower is better.
+
+Compare Jloft against Jglobal on the held-out low-loft rows. That answers whether knowing loft actually helps predict a trajectory excluded from fitting. Since lift is omitted, a successful multiplier is an empirical correction for this version of the model. Its value can change when you add lift.
+
+For the optimizer, I used a coarse sweep followed by fminbnd around the best sampled scale. That gives you a bounded, one-parameter fit in base MATLAB and works before R2021b. plot(out.grid,out.sweep.') shows the score versus multiplier for each training loft. A flat curve means the trajectory gives you little basis for choosing a precise multiplier. A narrow minimum can fall between grid points. 
+
+An independent Python check on synthetic histories recovered a held-out multiplier of 0.916002 against a known 0.916000. I haven’t run the MATLAB files with your propagator or truth data. Use your working Reynolds-number routine when you run them, since the shared Drag.m template still contains the ReynoldsNotConfigured placeholder.

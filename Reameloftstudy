@@ -1,44 +1,110 @@
-Fit one drag multiplier per launch loft and keep it constant throughout that run. Each truth case needs a label, launch loft, time vector, and N×3 ECI position and velocity histories. The first position and velocity initialize your propagator. The remaining samples tell the fitter how well it did. You don’t need an angle-of-attack history for this study.
+Yes, there could be an optimization problem here, but I don’t think the small initial trajectory error is necessarily what’s causing lsqnonlin to stop. After reviewing the actual fit_loft_drag_time.m we created, I see several more likely explanations.
 
-The two files are available individually for transcription, or together as a ZIP.
+1. The optimizer is not just looking at the beginning
 
-fit_loft_drag.m⁠￼ · drag_study_scale.m⁠￼ · Loft_Drag_Study.zip⁠￼
+Your current residual function computes:
 
-1. Change one line in Drag.m
+eR = reshape((R-run.R)/100, [], 1)/sqrt(n);
+eV = reshape((V-run.V)/1, [], 1)/sqrt(n);
 
-Replace inverseBeta = model.K_norm * CD; with:
+This includes every position and velocity sample throughout the trajectory.
 
-inverseBeta = drag_study_scale() * model.K_norm * CD;
+Because lsqnonlin minimizes the sum of squared residuals, larger errors later in the trajectory generally have more influence than smaller errors near the beginning.
 
-Put both downloaded functions alongside your propagator. drag_study_scale() defaults to 1. During a trial, the fitter sets it once, so the predictor and corrector both use the same multiplier. Your five-input call to propagate_traj works as before. The CD map still reports the aerodynamic table coefficient, and the multiplier acts on the resulting drag acceleration.
+For example, if position error is 10 m initially and 1,000 m later, the later error contributes 10,000 times as much to the squared position-error objective at that sample.
 
-2. Enter your cases and run the study
+So the optimizer doesn’t stop because the first few samples match well. It evaluates the complete propagated trajectory for every candidate multiplier vector.
 
-makeRun = @(label,loft,t,R,V) struct('label',label,'loftDeg',loft, ...
-                                     'time',t(:),'R',R,'V',V);
-runs(1) = makeRun('Case A', 10, tA, RA, VA);
-runs(2) = makeRun('Case B', 15, tB, RB, VB);
-runs(3) = makeRun('Case C', 25, tC, RC, VC);
-% Add one line per additional trajectory.
-scaleGrid = 0.90:0.025:1.10;
-out = fit_loft_drag(runs, dt, scaleGrid, 100, 1, 15);
-out.fit
-out.globalScale
-out.cases
+2. I suspect the bigger issue is sensitivity and numerical differentiation
 
-Use your normal propagation step for dt. The example weights, 100 metres and 1 m/s, mean that a 100 m position error contributes as much to the score as a 1 m/s velocity error. The fitter interpolates the propagated states onto the truth timestamps and averages the squared errors over time. Runs at the same loft share a fitted multiplier.
+Remember that we’re now optimizing potentially hundreds or thousands of drag multipliers:
 
-The final 15 holds out every 15° case. In this example, the study fits the 10° and 25° cases, linearly interpolates their multipliers to predict the 15° scale, then runs the 15° trajectory to score that prediction. For your low-loft question, hold out a low loft with a training loft on either side. Omit the last argument to fit all cases.
+\mathbf s=s_1,s_2,\\ldots,s_N^T
 
-3. Decide whether loft dependence helps
+Each multiplier affects the trajectory differently.
 
-Result	What it tells you
-out.fit	Best multiplier at each training loft. A value of 0.98 reduces drag acceleration by 2% at the same state.
-out.globalScale	Best single multiplier across all training runs, giving each run equal weight.
-out.cases	For each run, Jbase scores the original model, Jglobal scores the single multiplier, and Jloft scores the loft-dependent multiplier. Lower is better.
+An early multiplier can influence nearly the entire subsequent trajectory, whereas a multiplier near the end has very little time to influence position.
 
-Compare Jloft against Jglobal on the held-out low-loft rows. That answers whether knowing loft actually helps predict a trajectory excluded from fitting. Since lift is omitted, a successful multiplier is an empirical correction for this version of the model. Its value can change when you add lift.
+Consequently, the Jacobian
 
-For the optimizer, I used a coarse sweep followed by fminbnd around the best sampled scale. That gives you a bounded, one-parameter fit in base MATLAB and works before R2021b. plot(out.grid,out.sweep.') shows the score versus multiplier for each training loft. A flat curve means the trajectory gives you little basis for choosing a precise multiplier. A narrow minimum can fall between grid points. 
+J_{ij}=\frac{\partial e_i}{\partial s_j}
 
-An independent Python check on synthetic histories recovered a held-out multiplier of 0.916002 against a known 0.916000. I haven’t run the MATLAB files with your propagator or truth data. Use your working Reynolds-number routine when you run them, since the shared Drag.m template still contains the ReynoldsNotConfigured placeholder.
+can be poorly conditioned.
+
+lsqnonlin approximates these derivatives numerically by perturbing the multipliers and rerunning your propagator.
+
+This is where I would look first. The default finite-difference perturbations may be too small relative to the numerical precision of your propagation and interpolation. The optimizer might conclude that changing the multipliers doesn’t meaningfully improve the objective even when larger perturbations would.
+
+First change I’d make
+
+Replace your optimization options with:
+
+opts = optimoptions('lsqnonlin', ...
+    'Display','iter', ...
+    'FiniteDifferenceType','central', ...
+    'FiniteDifferenceStepSize',1e-3, ...
+    'MaxIterations',200);
+
+This makes the numerical sensitivity calculation more robust, though it increases computational cost.
+
+Also, change:
+
+x = lsqnonlin(fun,x0,0.85*x0,1.15*x0,opts);
+
+to:
+
+[x,resnorm,~,exitflag,output] = ...
+    lsqnonlin(fun,x0,0.85*x0,1.15*x0,opts);
+
+Inspect exitflag, output.message, and the iteration history. A termination based on small step size or first-order optimality does not necessarily mean you’ve found a good global fit.
+
+3. Your regularization may also be restricting the solution
+
+Look at the final two components of our residual:
+
+lambda = 1;
+mu = 0.1;
+e = [eR; eV; ...
+     sqrt(lambda)*diff(x)/0.05/sqrt(numel(x)-1); ...
+     sqrt(mu)*(x-1)/0.05/sqrt(numel(x))];
+
+These penalize rapid changes in the multiplier and deviations from unity.
+
+That’s useful, but it also means the optimizer is rewarded for keeping every multiplier near 1.
+
+If the improvement from changing a multiplier is relatively small, the regularization penalty can outweigh it. The resulting optimum may be close to the initial guess even though the propagated trajectory has substantial error.
+
+For a diagnostic, try:
+
+lambda = 0;
+mu = 0;
+
+Then compare the optimized multiplier history and trajectory error against your regularized result. This is a diagnostic, not necessarily the configuration you should retain.
+
+4. There is another important limitation: error accumulation
+
+Suppose the trajectory has been drifting away from truth for several minutes.
+
+Changing the drag multiplier at the current time does not immediately eliminate accumulated position error. It changes acceleration, which changes future velocity and position.
+
+That means an optimized correction history may try to compensate for earlier errors with later drag adjustments.
+
+It may even push multipliers toward their bounds to correct errors that originate from gravity, missing lift, or the numerical integrator rather than drag.
+
+This is especially relevant because your current model doesn’t yet include lift.
+
+5. The three tests I would run
+
+* Use nKnots = 25, rather than one independent multiplier per timestamp, and inspect convergence with Display='iter'.
+* Temporarily disable regularization to determine whether it is preventing the multipliers from changing.
+* Compare the objective at different uniform scales, such as all 1.00, all 0.98, and all 1.02. If those produce visibly different trajectory errors but lsqnonlin stops at all 1.00, that’s strong evidence that the optimization setup or numerical derivative calculation needs attention.
+
+My assessment
+
+I wouldn’t change the objective to emphasize the end of the trajectory yet. Your squared-error formulation already gives large late errors substantial weight.
+
+I’d first determine whether the optimizer is actually detecting the sensitivity of trajectory error to your drag multipliers.
+
+If it isn’t, increasing the late-time weighting won’t solve the underlying problem. If it is, but the fit remains poor, then we can investigate the bounds, regularization, missing physics, and whether a time-varying drag correction has enough control authority to reproduce the truth trajectory.
+
+One particularly useful result would be to see whether out(j).knotScale remains almost entirely at 1, or whether it changes significantly while the propagated trajectory still has large errors. Those two outcomes point to different problems.

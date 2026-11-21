@@ -1,37 +1,108 @@
+
 function out = fit_loft_drag_time(runs, dt, nKnots)
-%FIT_LOFT_DRAG_TIME Fit time-varying drag scales for each truth trajectory.
-% runs(j): label, loftDeg, time (Nx1), R (Nx3), V (Nx3).
-% Default: optimize at every truth time. Set nKnots=25 for a faster fit.
-% Requires Optimization Toolbox (lsqnonlin).
+% Fit time-varying drag scales for each truth trajectory.
+% runs(j): label, loftDeg, time (Nx1), R (Nx3), V (Nx3)
 
 opts = optimoptions('lsqnonlin','Display','off');
 cleanup = onCleanup(@() drag_study_scale('reset'));
 out = struct([]);
 
+% >>> ADDED: Adaptive refinement settings
+maxKnots = 60;
+refinePasses = 2;
+newPerPass = 15;
+% <<< ADDED
+
 for j = 1:numel(runs)
     run = runs(j);
     t = run.time(:);
+
     if nargin < 3 || isempty(nKnots)
-        m = numel(t);
+        % >>> CHANGED: Initial coarse optimization
+        m = min(20,numel(t));
+        % <<< CHANGED
     else
-        m = min(nKnots, numel(t));
-    end
-    if m < 2 || any(diff(t) == 0)
-        error('Each run needs at least two distinct time samples.');
+        m = min(nKnots,numel(t));
     end
 
-    knots = linspace(min(t), max(t), m).';
+    if m < 2 || any(diff(t) == 0) || ...
+            ~(all(diff(t) > 0) || all(diff(t) < 0))
+        error('Time samples must be strictly monotonic.');
+    end
+
+    knots = linspace(min(t),max(t),m).';
     x0 = ones(m,1);
-    fun = @(x) residual(x, knots, run, dt);
-    x = lsqnonlin(fun, x0, 0.85*x0, 1.15*x0, opts);
-    s = interp1(knots, x, t, 'linear');
 
-    drag_study_scale('set', knots, x);
-    [Rp, Vp, tp] = propagate_traj(run.R(1,:), run.V(1,:), ...
-                                t(1), t(end), dt);
-    [tp, idx] = sort(tp(:));
-    Rp = interp1(tp, Rp(idx,:), t);
-    Vp = interp1(tp, Vp(idx,:), t);
+    fun = @(x) residual(x,knots,run,dt);
+    x = lsqnonlin(fun,x0,0.85*x0,1.15*x0,opts);
+
+    % >>> ADDED: Adaptive refinement loop
+    for pass = 1:refinePasses
+        if numel(knots) >= maxKnots
+            break
+        end
+
+        % Propagate with current optimized multipliers
+        drag_study_scale('set',knots,x);
+        [~,Vp,tp] = propagate_traj( ...
+            run.R(1,:),run.V(1,:),t(1),t(end),dt);
+
+        [tp,idx] = sort(tp(:));
+        Vp = interp1(tp,Vp(idx,:),t);
+
+        % Find rapid velocity-error growth
+        vErr = sqrt(sum((Vp-run.V).^2,2));
+        growth = max(diff(vErr)./abs(diff(t)),0);
+        growth = movmean(growth,5);
+
+        [~,order] = sort(growth,'descend');
+
+        % Save previous solution
+        oldKnots = knots;
+        oldX = x;
+        minSpacing = 0.25*min(diff(oldKnots));
+
+        % Insert knots in high-growth regions
+        count = 0;
+        for q = order(:).'
+            candidate = (t(q)+t(q+1))/2;
+
+            if min(abs(knots-candidate)) > minSpacing
+                knots = sort([knots;candidate]);
+                count = count+1;
+            end
+
+            if count >= min(newPerPass, ...
+                    maxKnots-numel(oldKnots))
+                break
+            end
+        end
+
+        if count == 0
+            break
+        end
+
+        % Warm start using previous optimized solution
+        x0 = interp1(oldKnots,oldX,knots,'linear');
+
+        % Re-optimize with refined knot placement
+        fun = @(z) residual(z,knots,run,dt);
+        x = lsqnonlin(fun,x0, ...
+            0.85*ones(size(x0)), ...
+            1.15*ones(size(x0)),opts);
+    end
+    % <<< ADDED
+
+    s = interp1(knots,x,t,'linear');
+
+    drag_study_scale('set',knots,x);
+
+    [Rp,Vp,tp] = propagate_traj( ...
+        run.R(1,:),run.V(1,:),t(1),t(end),dt);
+
+    [tp,idx] = sort(tp(:));
+    Rp = interp1(tp,Rp(idx,:),t);
+    Vp = interp1(tp,Vp(idx,:),t);
 
     out(j).label = run.label;
     out(j).loftDeg = run.loftDeg;
@@ -44,20 +115,28 @@ for j = 1:numel(runs)
 end
 end
 
-function e = residual(x, knots, run, dt)
+% UNCHANGED: Original residual function
+function e = residual(x,knots,run,dt)
+
 t = run.time(:);
-drag_study_scale('set', knots, x);
-[R, V, tp] = propagate_traj(run.R(1,:), run.V(1,:), ...
-                           t(1), t(end), dt);
-[tp, idx] = sort(tp(:));
-R = interp1(tp, R(idx,:), t);
-V = interp1(tp, V(idx,:), t);
+
+drag_study_scale('set',knots,x);
+
+[R,V,tp] = propagate_traj( ...
+    run.R(1,:),run.V(1,:),t(1),t(end),dt);
+
+[tp,idx] = sort(tp(:));
+R = interp1(tp,R(idx,:),t);
+V = interp1(tp,V(idx,:),t);
 
 n = numel(t);
-% Normalize position/velocity errors and penalize irregular scales.
-eR = reshape((R-run.R)/100, [], 1)/sqrt(n);
-eV = reshape((V-run.V)/1, [], 1)/sqrt(n);
-lambda = 1; mu = 0.1;
-e = [eR; eV; sqrt(lambda)*diff(x)/0.05/sqrt(numel(x)-1); ...
+eR = reshape((R-run.R)/100,[],1)/sqrt(n);
+eV = reshape((V-run.V)/1,[],1)/sqrt(n);
+
+lambda = 1;
+mu = 0.1;
+
+e = [eR; eV; ...
+     sqrt(lambda)*diff(x)/0.05/sqrt(numel(x)-1); ...
      sqrt(mu)*(x-1)/0.05/sqrt(numel(x))];
 end

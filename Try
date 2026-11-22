@@ -1,0 +1,71 @@
+Yes, a genetic algorithm (GA) could help, particularly if lsqnonlin is converging to a poor local minimum. But the sequence you’re seeing—
+
+1000 \rightarrow 820 \rightarrow 815 \rightarrow 815
+
+—doesn’t necessarily prove that the optimizer is trapped in a local minimum. It could also be stopping because of a poorly conditioned Jacobian, weak sensitivity to the drag multipliers, or excessive regularization.
+
+Why GA might work better
+
+Your current problem optimizes a vector of drag multipliers:
+
+\mathbf{s}=s_1,s_2,\\ldots,s_N^T
+
+lsqnonlin uses local derivative information to improve that vector. GA instead explores a population of candidate multiplier vectors, making it less dependent on a particular starting point.
+
+However, GA is considerably more computationally expensive and doesn’t guarantee finding the global minimum. MATLAB +1
+
+What I’d recommend: GA followed by lsqnonlin
+
+This is a hybrid optimization strategy:
+
+* GA searches broadly for a promising multiplier history.
+* lsqnonlin refines the solution using local least-squares optimization.
+* Your existing adaptive knot refinement can remain unchanged.
+
+You can test this by replacing your initial lsqnonlin call with:
+
+% Existing residual function
+fun = @(x) residual(x,knots,run,dt);
+% NEW: Genetic algorithm
+n = numel(x0);
+lb = 0.85*ones(n,1);
+ub = 1.15*ones(n,1);
+fitness = @(x) sum(fun(x(:)).^2);
+gaOpts = optimoptions('ga', ...
+    'Display','iter', ...
+    'PopulationSize',40, ...
+    'MaxGenerations',30);
+[xGA,fGA] = ga(fitness,n,[],[],[],[], ...
+               lb,ub,[],gaOpts);
+% NEW: Refine the GA solution using lsqnonlin
+x = lsqnonlin(fun,xGA(:),lb,ub,opts);
+
+This requires Global Optimization Toolbox for ga and Optimization Toolbox for lsqnonlin. Both solvers are available in MATLAB R2021b.
+
+Important: GA requires a scalar objective, so we minimize the sum of squared residuals. This is equivalent to what lsqnonlin was minimizing. MATLAB
+
+Before doing that, I’d run one diagnostic
+
+Inside your fitting function, after defining fun, evaluate:
+
+for s = [0.90 0.95 1.00 1.05 1.10]
+    J = sum(fun(s*ones(size(x0))).^2);
+    fprintf('Scale %.2f: Cost %.4f\n',s,J);
+end
+
+This will show how the objective responds to five different constant drag scales.
+
+* If a scale of 0.95 gives a cost of 500 while your optimizer stopped at 815, that’s strong evidence the local optimization needs investigation.
+* If every scale gives approximately 815, the trajectory may have low sensitivity to these corrections, or the objective may be dominated by errors that drag scaling cannot fix.
+
+Also inspect the lsqnonlin exit message, because stopping due to small changes is different from demonstrating a good optimum.
+
+My recommendation for your current implementation
+
+I’d first try GA + lsqnonlin using 10–20 initial knots, then allow your existing adaptive refinement to increase the knot count.
+
+I would not initially run GA over 50–60 independent multipliers. The search space grows substantially, and every fitness evaluation requires a trajectory propagation.
+
+That combination gives you a broader initial search while preserving almost all of the MATLAB code we’ve already developed.
+
+One final point: if GA also consistently stops around 815, I would investigate whether the remaining error comes from missing lift, gravity-model differences, numerical integration, or trajectory timing rather than assuming the optimizer is failing.

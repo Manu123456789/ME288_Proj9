@@ -1,0 +1,56 @@
+LIFT CALIBRATION PACKAGE (MATLAB R2021b compatible)
+===================================================
+
+WHAT IS OPTIMIZED?
+  Effective signed C_L(t) per loft angle, NOT a multiplier on CFD C_L.
+  a_lift = qbar * K_norm * C_L,fit(t) * liftDir
+  liftDir is local radial-up projected perpendicular to air-relative velocity.
+  This is a prescribed 3-DoF lift-up direction, not body attitude/roll dynamics.
+
+YOUR EXISTING Drag.m DOES NOT CHANGE. The CD map's third output does not change.
+Keep the existing drag correction:
+  inverseBeta = drag_study_scale(t) * model.K_norm * CD;
+
+ONLY REQUIRED PROPAGATOR PATCH: At EACH Heun stage, reuse the Drag aero output:
+  [aDrag1,aero1] = Drag(R_i,V_i,time(k));
+  aLift1 = lift_accel(R_i,V_i,time(k),aero1);
+  a1 = AccelGrav(R_i) + aDrag1 + aLift1;
+
+  [aDrag2,aero2] = Drag(R_pred,V_pred,time(k+1));
+  aLift2 = lift_accel(R_pred,V_pred,time(k+1),aero2);
+  a2 = AccelGrav(R_pred) + aDrag2 + aLift2;
+
+Substitute your actual state/gravity variable names. Keep the 5-input
+propagate_traj signature; preserve other Heun equations unchanged.
+
+WORKFLOW:
+1. Place lift_accel.m, lift_study_coefficient.m, fit_loft_lift_time.m,
+   set_loft_lift.m beside your existing MATLAB files.
+2. Apply the 2-stage propagator patch above.
+3. Load existing runs, dragOut matching runs in order, and dt.
+4. Run outLift = fit_loft_lift_time(runs,dragOut,dt,12);
+5. Replay with both drag_study_scale('set',...) and
+   lift_study_coefficient('set',...), then reset both when finished.
+6. For intermediate lofts use set_loft_drag AND set_loft_lift.
+   CAUTION: both original interpolation setters normalize and stretch
+   time to user [t0,tf]; do not treat arbitrary durations as validated.
+
+IMPORTANT PHYSICS / CALIBRATION CAVEATS:
+* If adding table-derived lift causes huge mismatch, verify sign and physical
+  direction (wind-vs-body, AoA, lift axis) BEFORE interpreting fitted C_L.
+* Optimizing C_L can hide other errors, including drag errors or missing roll.
+* For nearly radial flight, the projected radial-up lift direction is
+  undefined and lift_accel returns zero.
+* Fit lift with drag frozen first; only after diagnostics consider jointly
+  refining drag and lift to avoid double-compensation.
+* Aerodynamic table CL returned by Drag.m is diagnostic and UNUSED by lift_accel.
+* This assumes omegaEarth=[0 0 7e-5], same as Drag.m, and K_norm is in
+  MATLAB base workspace. Update omegaEarth in lift_accel if you change it
+  in Drag.m. clear lift_accel after changing K_norm.
+* Requires Optimization Toolbox for lsqnonlin. Not tested in MATLAB runtime.
+
+TUNING:
+  nKnots=12 by default; start with 4-12 before increasing.
+  +/-0.2 are illustrative effective CL bounds; choose physical limits.
+  position error scale 100 m, velocity 1 m/s; regularization lambda=0.1,
+  mu=0.01 are starting points. Use held-out lofts to validate.
